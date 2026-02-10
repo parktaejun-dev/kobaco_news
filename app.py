@@ -4,10 +4,12 @@ import feedparser
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, date
 import re
 import time
+from time import mktime
 from urllib.parse import quote_plus
+import io
 
 # -----------------------------------------------------------------------------
 # 1. UI/UX 설정
@@ -17,6 +19,41 @@ st.set_page_config(
     layout="wide",
     page_icon="📰"
 )
+
+# 세션 상태 초기화
+if 'news_data' not in st.session_state:
+    st.session_state['news_data'] = []
+if 'data_collected' not in st.session_state:
+    st.session_state['data_collected'] = False
+
+def get_news(keyword, start_date, end_date):
+    """
+    구글 뉴스 RSS를 통해 키워드별 기사를 가져오고 날짜로 필터링함.
+    """
+    encoded_keyword = quote_plus(keyword.strip())
+    rss_url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl=ko&gl=KR&ceid=KR:ko"
+    feed = feedparser.parse(rss_url)
+
+    articles = []
+    # 상위 30개 추출 (필터링을 위해 범위를 늘림)
+    for entry in feed.entries[:30]:
+        try:
+            # RSS 날짜 파싱 (struct_time -> date)
+            pub_date = datetime.fromtimestamp(mktime(entry.published_parsed)).date()
+        except (AttributeError, TypeError):
+            continue
+
+        # 날짜 필터링
+        if start_date <= pub_date <= end_date:
+            articles.append({
+                'keyword': keyword,
+                'title': entry.title,
+                'link': entry.link,
+                'published': entry.published,
+                'pub_date': pub_date,
+                'summary': entry.get('summary', '')
+            })
+    return articles
 
 # 헤더 섹션
 st.title(f"KOBACO 영업정책팀 모닝 브리핑 📰")
@@ -37,6 +74,55 @@ keywords_input = st.sidebar.text_area(
 )
 # 리스트로 변환 (공백 제거)
 keywords = [k.strip() for k in keywords_input.split(',') if k.strip()]
+
+# -----------------------------------------------------------------------------
+# 수집 설정 (날짜 및 버튼)
+# -----------------------------------------------------------------------------
+st.sidebar.divider()
+st.sidebar.subheader("📅 수집 기간 설정")
+
+col_date1, col_date2 = st.sidebar.columns(2)
+with col_date1:
+    start_date = st.sidebar.date_input("시작일", value=datetime.now().date())
+with col_date2:
+    end_date = st.sidebar.date_input("종료일", value=datetime.now().date())
+
+col_btn1, col_btn2 = st.sidebar.columns(2)
+with col_btn1:
+    collect_btn = st.sidebar.button("뉴스 수집 시작", type="primary")
+with col_btn2:
+    clear_btn = st.sidebar.button("데이터 초기화")
+
+# 데이터 초기화 로직
+if clear_btn:
+    st.session_state['news_data'] = []
+    st.session_state['data_collected'] = False
+    st.rerun()
+
+# 뉴스 수집 로직
+if collect_btn:
+    st.session_state['news_data'] = []  # 기존 데이터 초기화
+    st.session_state['data_collected'] = True
+
+    if not keywords:
+        st.sidebar.error("키워드를 입력해주세요.")
+    else:
+        status_text = st.sidebar.empty()
+        status_text.text("수집 시작...")
+
+        all_articles = []
+        progress_bar = st.sidebar.progress(0)
+
+        for i, kw in enumerate(keywords):
+            status_text.text(f"'{kw}' 수집 중...")
+            items = get_news(kw, start_date, end_date)
+            all_articles.extend(items)
+            progress_bar.progress((i + 1) / len(keywords))
+
+        st.session_state['news_data'] = all_articles
+        status_text.text("수집 완료!")
+        progress_bar.empty()
+        st.rerun()
 
 # 수신자 리스트 연동 (구글 스프레드시트)
 st.sidebar.subheader("📧 수신자 리스트")
@@ -88,63 +174,97 @@ with st.sidebar.expander("수신자 명단 미리보기"):
 # -----------------------------------------------------------------------------
 # 3. 뉴스 수집 및 표시 (메인 화면)
 # -----------------------------------------------------------------------------
-def get_news(keyword):
-    """
-    구글 뉴스 RSS를 통해 키워드별 최신 기사 3개를 가져옴.
-    """
-    # 키워드 내 공백/특수문자를 안전하게 인코딩해 InvalidURL 예외를 방지.
-    encoded_keyword = quote_plus(keyword.strip())
-    rss_url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl=ko&gl=KR&ceid=KR:ko"
-    feed = feedparser.parse(rss_url)
-
-    articles = []
-    # 상위 3개만 추출
-    for entry in feed.entries[:3]:
-        articles.append({
-            'title': entry.title,
-            'link': entry.link,
-            'published': entry.published,
-            'summary': entry.get('summary', '') # 요약이 없을 수도 있음
-        })
-    return articles
 
 # 이메일 본문 생성을 위한 저장소
 email_content_html = f"<h2>📅 {datetime.now().strftime('%Y년 %m월 %d일')} 뉴스 브리핑</h2><hr>"
 
 # 메인 화면 뉴스 카드 배치
-if keywords:
-    for kw in keywords:
-        st.subheader(f"🔍 {kw}")
-        articles = get_news(kw)
-
-        # 이메일 본문에 섹션 추가
-        email_content_html += f"<h3>[{kw}]</h3><ul>"
-
-        if not articles:
-            st.info("관련된 최신 기사가 없습니다.")
-            email_content_html += "<li>기사 없음</li>"
-        else:
-            # 3단 컬럼 배치
-            cols = st.columns(3)
-            for idx, article in enumerate(articles):
-                # 컬럼 인덱스 순환 (0, 1, 2)
-                col = cols[idx % 3]
-
-                with col:
-                    # 카드 스타일링 (컨테이너 사용)
-                    with st.container(border=True):
-                        st.markdown(f"**{article['title']}**")
-                        # 날짜 포맷팅 시도 (복잡하면 원본 문자열 사용)
-                        st.caption(article['published'])
-                        st.link_button("기사 보기", article['link'])
-
-                # 이메일 본문에 기사 추가
-                email_content_html += f"<li><a href='{article['link']}'><b>{article['title']}</b></a><br><small>{article['published']}</small></li>"
-
-        email_content_html += "</ul><br>"
-        st.markdown("---")
+if not st.session_state['data_collected']:
+    st.info("좌측 사이드바에서 '뉴스 수집 시작' 버튼을 눌러주세요.")
 else:
-    st.warning("키워드를 입력해주세요.")
+    if not keywords:
+        st.warning("키워드를 입력해주세요.")
+    else:
+        # ---------------------------------------------------------------------
+        # 데이터 다운로드 (엑셀 / 마크다운)
+        # ---------------------------------------------------------------------
+        if st.session_state['news_data']:
+            df = pd.DataFrame(st.session_state['news_data'])
+            # 필요한 컬럼만 선택 및 정렬
+            cols_to_export = ['keyword', 'title', 'pub_date', 'link', 'summary']
+            # 컬럼이 존재하는지 확인 (안전장치)
+            cols_to_export = [c for c in cols_to_export if c in df.columns]
+            df_export = df[cols_to_export]
+
+            col_dl1, col_dl2 = st.columns(2)
+
+            # 1. 엑셀 다운로드
+            with col_dl1:
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_export.to_excel(writer, index=False)
+
+                st.download_button(
+                    label="📥 엑셀 다운로드",
+                    data=buffer.getvalue(),
+                    file_name=f"news_briefing_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            # 2. 마크다운 다운로드
+            with col_dl2:
+                md_text = f"# 📅 {datetime.now().strftime('%Y년 %m월 %d일')} 뉴스 브리핑\n\n"
+                for kw in keywords:
+                    kw_articles = [item for item in st.session_state['news_data'] if item['keyword'] == kw]
+                    md_text += f"## 🔍 {kw}\n\n"
+                    if not kw_articles:
+                        md_text += "- 기사 없음\n"
+                    else:
+                        for article in kw_articles:
+                            md_text += f"- **[{article['title']}]({article['link']})** ({article['pub_date']})\n"
+                    md_text += "\n---\n\n"
+
+                st.download_button(
+                    label="📥 마크다운 다운로드",
+                    data=md_text,
+                    file_name=f"news_briefing_{datetime.now().strftime('%Y%m%d')}.md",
+                    mime="text/markdown"
+                )
+
+            st.divider()
+
+        for kw in keywords:
+            st.subheader(f"🔍 {kw}")
+
+            # 현재 키워드에 해당하는 기사 필터링
+            articles = [item for item in st.session_state['news_data'] if item['keyword'] == kw]
+
+            # 이메일 본문에 섹션 추가
+            email_content_html += f"<h3>[{kw}]</h3><ul>"
+
+            if not articles:
+                st.info("설정된 기간 내 관련된 기사가 없습니다.")
+                email_content_html += "<li>기사 없음</li>"
+            else:
+                # 3단 컬럼 배치
+                cols = st.columns(3)
+                for idx, article in enumerate(articles):
+                    # 컬럼 인덱스 순환 (0, 1, 2)
+                    col = cols[idx % 3]
+
+                    with col:
+                        # 카드 스타일링 (컨테이너 사용)
+                        with st.container(border=True):
+                            st.markdown(f"**{article['title']}**")
+                            # 날짜 포맷팅 시도 (복잡하면 원본 문자열 사용)
+                            st.caption(article['published'])
+                            st.link_button("기사 보기", article['link'])
+
+                    # 이메일 본문에 기사 추가
+                    email_content_html += f"<li><a href='{article['link']}'><b>{article['title']}</b></a><br><small>{article['published']}</small></li>"
+
+            email_content_html += "</ul><br>"
+            st.markdown("---")
 
 # -----------------------------------------------------------------------------
 # 4. 이메일 자동 발송 기능
