@@ -7,6 +7,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import re
 import time
+from urllib.parse import quote_plus
 
 # -----------------------------------------------------------------------------
 # 1. UI/UX 설정
@@ -91,9 +92,9 @@ def get_news(keyword):
     """
     구글 뉴스 RSS를 통해 키워드별 최신 기사 3개를 가져옴.
     """
-    # URL 인코딩은 feedparser가 내부적으로 처리하거나, f-string으로 넣어도 대부분 동작하지만
-    # 안전하게 urllib를 쓸 수도 있음. 여기선 f-string 사용.
-    rss_url = f"https://news.google.com/rss/search?q={keyword}&hl=ko&gl=KR&ceid=KR:ko"
+    # 키워드 내 공백/특수문자를 안전하게 인코딩해 InvalidURL 예외를 방지.
+    encoded_keyword = quote_plus(keyword.strip())
+    rss_url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
 
     articles = []
